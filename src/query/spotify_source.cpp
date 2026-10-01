@@ -26,6 +26,7 @@
 #    include "../util/creds.hpp"
 #endif
 #include "../util/utility.hpp"
+#include <algorithm>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -43,6 +44,8 @@
 #define PLAYER_VOLUME_URL (PLAYER_URL "/volume")
 #define CURL_DEBUG 0L
 #define REDIRECT_URI "https%3A%2F%2Funivrsal.github.io%2Fauth%2Ftoken"
+/* Token requests are rare, give them enough time even on slow connections */
+#define TOKEN_TIMEOUT_MIN_MS 15000
 
 spotify_source::spotify_source()
     : music_source(S_SOURCE_SPOTIFY, T_SOURCE_SPOTIFY, new spotify)
@@ -55,6 +58,17 @@ spotify_source::spotify_source()
 bool spotify_source::enabled() const
 {
     return true;
+}
+
+void spotify_source::persist()
+{
+    CSET_BOOL(CFG_SPOTIFY_LOGGEDIN, m_logged_in);
+    CSET_STR(CFG_SPOTIFY_TOKEN, qt_to_utf8(m_token));
+    CSET_STR(CFG_SPOTIFY_REFRESH_TOKEN, qt_to_utf8(m_refresh_token));
+    CSET_STR(CFG_SPOTIFY_AUTH_CODE, qt_to_utf8(m_auth_code));
+    CSET_INT(CFG_SPOTIFY_TOKEN_TERMINATION, m_token_termination);
+    if (config_save_safe(config::instance, "tmp", nullptr) != CONFIG_SUCCESS)
+        berr("Couldn't write Spotify login to the OBS config file");
 }
 
 void spotify_source::build_credentials()
@@ -100,7 +114,7 @@ void spotify_source::load()
             const auto result = do_refresh_token(log);
             if (result)
                 binfo("Successfully renewed Spotify token");
-            save();
+            persist();
             music_source::load(); // Reload token stuff etc.
         }
     }
@@ -135,11 +149,15 @@ void spotify_source::refresh()
     bdebug("[Spotify] begin refresh");
 
     if (util::epoch() > m_token_termination) {
+        if (util::epoch() < m_refresh_retry_at)
+            return; /* last refresh failed, wait a bit before retrying */
         binfo("Refreshing Spotify token");
         QString log;
-        do_refresh_token(log);
-        //        emit(get_ui<spotify>())->login_state_changed(result, log);
-        save();
+        if (!do_refresh_token(log)) {
+            m_refresh_retry_at = util::epoch() + 30;
+            return;
+        }
+        m_refresh_retry_at = 0;
     }
 
     if (m_timout_start) {
@@ -426,12 +444,15 @@ bool spotify_source::do_refresh_token(QString& log)
         berr("Refresh token is empty!");
     }
 
+    bool revoked = false; /* Spotify explicitly rejected the refresh token */
+
     request = "grant_type=refresh_token&refresh_token=";
     request.append(m_refresh_token.toStdString());
-    request_token(request, m_creds.toStdString(), response, m_curl_timeout_ms);
+    request_token(request, m_creds.toStdString(), response, std::max<int64_t>(m_curl_timeout_ms, TOKEN_TIMEOUT_MIN_MS));
 
     if (response.isNull()) {
         berr("Couldn't refresh Spotify token, response was null");
+        log = "No response from Spotify (network error or timeout). Will retry automatically.";
     } else {
         const auto& response_obj = response.object();
         const auto& token = response_obj["access_token"];
@@ -447,10 +468,12 @@ bool spotify_source::do_refresh_token(QString& log)
             result = true;
             binfo("Successfully logged in");
         } else {
-            if (error.isString())
+            if (error.isString()) {
                 berr("Received error from spotify: %s", qt_to_utf8(error.toString()));
-            else
+                revoked = error.toString() == "invalid_grant" || error.toString() == "invalid_client";
+            } else {
                 berr("Couldn't parse json response");
+            }
         }
 
         /* Refreshing the token can return a new refresh token */
@@ -463,8 +486,14 @@ bool spotify_source::do_refresh_token(QString& log)
         }
     }
 
-    m_logged_in = result;
-    save();
+    /* Only drop the login if Spotify really rejected it. A timeout or a
+     * network hiccup must not wipe the saved login, otherwise the user has
+     * to log in again after every OBS start with flaky internet */
+    if (result)
+        m_logged_in = true;
+    else if (revoked || m_refresh_token.isEmpty())
+        m_logged_in = false;
+    persist();
     return result;
 }
 
@@ -478,7 +507,7 @@ bool spotify_source::new_token(QString& log)
     request = "grant_type=authorization_code&code=";
     request.append(m_auth_code.toStdString());
     request.append("&redirect_uri=").append(REDIRECT_URI);
-    request_token(request, m_creds.toStdString(), response, m_curl_timeout_ms);
+    request_token(request, m_creds.toStdString(), response, std::max<int64_t>(m_curl_timeout_ms, TOKEN_TIMEOUT_MIN_MS));
 
     if (response.isObject()) {
         const auto& response_obj = response.object();
@@ -498,10 +527,13 @@ bool spotify_source::new_token(QString& log)
             berr("Couldn't parse json response!");
         }
     } else {
+        log = "No response from Spotify (network error or timeout). Check the OBS log, then get a new code via 'Open login page'.";
     }
 
-    m_logged_in = result;
-    save();
+    /* A failed attempt with a new code doesn't invalidate an existing login */
+    if (result)
+        m_logged_in = true;
+    persist();
     return result;
 }
 
