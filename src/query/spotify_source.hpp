@@ -34,6 +34,7 @@ class spotify_source : public music_source {
     int64_t m_token_termination = 0;
 
     int64_t m_curl_timeout_ms = 1000;
+    int64_t m_refresh_retry_at = 0; /* Don't hammer Spotify after a failed refresh */
 
     uint64_t m_timeout_length = 0, /* Rate limit timeout length */
         m_timout_start = 0;        /* Timeout start */
@@ -49,6 +50,9 @@ public:
     bool execute_capability(capability c) override;
     bool do_refresh_token(QString& log);
     bool new_token(QString& log);
+    /* Writes tokens to the OBS config and flushes it to disk right away,
+     * so a crash or a killed OBS doesn't lose the login */
+    void persist();
     void set_auth_code(const QString& auth_code) { m_auth_code = auth_code; }
     bool is_logged_in() const { return m_logged_in; }
     int token_termination() const { return m_token_termination; }
