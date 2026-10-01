@@ -34,7 +34,6 @@ class spotify : public source_widget {
     Q_OBJECT
     void apply_login_state(bool state, const QString& log);
 
-    std::promise<result>*m_token_request_promise {}, *m_token_refresh_promise {};
     std::future<result> m_token_request_future {}, m_token_refresh_future {};
 
 public:
