@@ -11,7 +11,7 @@
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  *************************************************************************/
@@ -33,6 +33,7 @@ class spotify : public source_widget {
 
     Q_OBJECT
     void apply_login_state(bool state, const QString& log);
+    void show_error(const QString& log);
 
     std::future<result> m_token_request_future {}, m_token_refresh_future {};
 
