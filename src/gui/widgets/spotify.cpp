@@ -16,6 +16,7 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  *************************************************************************/
 
+#include <memory>
 #include "spotify.hpp"
 #include "../../query/spotify_source.hpp"
 #include "../../util/config.hpp"
@@ -36,8 +37,6 @@ spotify::spotify(QWidget* parent)
 spotify::~spotify()
 {
     delete ui;
-    delete m_token_refresh_promise;
-    delete m_token_request_promise;
 }
 
 void spotify::load_settings()
@@ -73,16 +72,12 @@ void spotify::tick()
         auto result = m_token_refresh_future.get();
         apply_login_state(result.success, result.value);
         m_token_refresh_future = {};
-        delete m_token_refresh_promise;
-        m_token_refresh_promise = nullptr;
     }
 
     if (check(m_token_request_future)) {
         auto result = m_token_request_future.get();
         apply_login_state(result.success, result.value);
         m_token_request_future = {};
-        delete m_token_request_promise;
-        m_token_request_promise = nullptr;
     }
 }
 
@@ -177,17 +172,24 @@ void spotify::on_btn_request_token_clicked()
 
     if (spotify) {
         spotify->set_auth_code(ui->txt_auth_code->text());
-        delete m_token_request_promise;
-        m_token_request_promise = new std::promise<result>;
-        m_token_request_future = m_token_request_promise->get_future();
+        /* Ignore repeated clicks while a request is still running */
+        if (m_token_request_future.valid())
+            return;
+        /* The thread owns its promise (shared_ptr) and does not touch `this`,
+         * so closing the settings dialog or clicking again can't leave it
+         * with a dangling pointer */
+        auto promise = std::make_shared<std::promise<result>>();
+        m_token_request_future = promise->get_future();
         // Do the request in a separate thread so the ui doesn't freeze
-        std::thread([this] {
+        std::thread([promise] {
+            result r {};
             auto spotify = music_sources::get<spotify_source>(S_SOURCE_SPOTIFY);
             if (spotify) {
                 QString log;
-                bool result = spotify->new_token(log);
-                m_token_request_promise->set_value_at_thread_exit({ result, log });
+                r.success = spotify->new_token(log);
+                r.value = log;
             }
+            promise->set_value(r);
         }).detach();
     } else {
         berr("Couldn't get spotify source instance");
@@ -228,17 +230,21 @@ void spotify::on_btn_performrefresh_clicked()
 
     if (spotify) {
         spotify->set_auth_code(ui->txt_auth_code->text());
-        m_token_refresh_promise = new std::promise<spotify::result>;
-        m_token_refresh_future = m_token_refresh_promise->get_future();
+        if (m_token_refresh_future.valid())
+            return;
+        auto promise = std::make_shared<std::promise<result>>();
+        m_token_refresh_future = promise->get_future();
 
-        // Do the refresh in a  separate thread so the ui doesn't freeze
-        std::thread([this] {
+        // Do the refresh in a separate thread so the ui doesn't freeze
+        std::thread([promise] {
+            result r {};
             auto spotify = music_sources::get<spotify_source>(S_SOURCE_SPOTIFY);
             if (spotify) {
                 QString log;
-                bool result = spotify->do_refresh_token(log);
-                m_token_refresh_promise->set_value_at_thread_exit({ result, log });
+                r.success = spotify->do_refresh_token(log);
+                r.value = log;
             }
+            promise->set_value(r);
         }).detach();
     } else {
         berr("Couldn't get spotify source instance");
