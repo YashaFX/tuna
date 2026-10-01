@@ -11,7 +11,7 @@
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  *************************************************************************/
@@ -23,8 +23,10 @@
 #include "../../util/constants.hpp"
 #include "../../util/utility.hpp"
 #include "ui_spotify.h"
+#include <QDateTime>
 #include <QDesktopServices>
 #include <QMessageBox>
+#include <util/config-file.h>
 
 spotify::spotify(QWidget* parent)
     : source_widget(parent)
@@ -47,6 +49,7 @@ void spotify::load_settings()
 
     ui->txt_client_id->setText(id);
     ui->txt_secret->setText(secret);
+    ui->sb_timeout_ms->setValue(int(CGET_INT(CFG_SPOTIFY_REQUEST_TIMEOUT)));
     apply_login_state(state, "");
 
     if (!state)
@@ -68,16 +71,25 @@ void spotify::tick()
         return false;
     };
 
+    auto handle = [this](const result& r) {
+        auto spotify = music_sources::get<spotify_source>(S_SOURCE_SPOTIFY);
+        const bool logged_in = r.success || (spotify && spotify->is_logged_in());
+        apply_login_state(logged_in, r.success ? r.value : QString());
+        ui->btn_request_token->setEnabled(!ui->txt_auth_code->text().isEmpty());
+        if (!r.success)
+            show_error(r.value);
+    };
+
     if (check(m_token_refresh_future)) {
-        auto result = m_token_refresh_future.get();
-        apply_login_state(result.success, result.value);
+        auto r = m_token_refresh_future.get();
         m_token_refresh_future = {};
+        handle(r);
     }
 
     if (check(m_token_request_future)) {
-        auto result = m_token_request_future.get();
-        apply_login_state(result.success, result.value);
+        auto r = m_token_request_future.get();
         m_token_request_future = {};
+        handle(r);
     }
 }
 
@@ -85,6 +97,7 @@ void spotify::save_settings()
 {
     CSET_STR(CFG_SPOTIFY_CLIENT_ID, qt_to_utf8(ui->txt_client_id->text()));
     CSET_STR(CFG_SPOTIFY_CLIENT_SECRET, qt_to_utf8(ui->txt_secret->text()));
+    CSET_INT(CFG_SPOTIFY_REQUEST_TIMEOUT, ui->sb_timeout_ms->value());
     auto spotify = music_sources::get<spotify_source>(S_SOURCE_SPOTIFY);
     if (spotify) {
         CSET_STR(CFG_SPOTIFY_AUTH_CODE, qt_to_utf8(spotify->auth_code()));
@@ -175,6 +188,9 @@ void spotify::on_btn_request_token_clicked()
         /* Ignore repeated clicks while a request is still running */
         if (m_token_request_future.valid())
             return;
+        ui->btn_request_token->setEnabled(false);
+        ui->lbl_spotify_info->setText("Requesting token...");
+        ui->lbl_spotify_info->setStyleSheet("QLabel {}");
         /* The thread owns its promise (shared_ptr) and does not touch `this`,
          * so closing the settings dialog or clicking again can't leave it
          * with a dangling pointer */
@@ -196,6 +212,17 @@ void spotify::on_btn_request_token_clicked()
     }
 }
 
+void spotify::show_error(const QString& log)
+{
+    ui->lbl_spotify_info->setText("Spotify login failed. Codes work only once: click 'Open login page' to get a new one. Details below.");
+    ui->lbl_spotify_info->setStyleSheet("QLabel { color: red; font-weight: bold; }");
+    ui->lbl_spotify_info->setWordWrap(true);
+    /* Errors never contain tokens, so always show them */
+    QDateTime now = QDateTime::currentDateTime();
+    ui->txt_json_log->append("= " + now.toString("yyyy.MM.dd hh:mm") + " =");
+    ui->txt_json_log->append(log.isEmpty() ? QString("No details, see the OBS log (Help -> Log Files)") : log);
+}
+
 void spotify::apply_login_state(bool state, const QString& log)
 {
     if (state) {
@@ -210,6 +237,8 @@ void spotify::apply_login_state(bool state, const QString& log)
         ui->lbl_spotify_info->setStyleSheet("QLabel { color: green; "
                                             "font-weight: bold;}");
         save_settings();
+        /* Write to disk now, not only when OBS exits cleanly */
+        config_save_safe(config::instance, "tmp", nullptr);
     } else {
         ui->lbl_spotify_info->setText(T_SPOTIFY_LOGGEDOUT);
         ui->lbl_spotify_info->setStyleSheet("QLabel {}");
